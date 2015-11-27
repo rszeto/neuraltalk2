@@ -25,6 +25,7 @@ cmd:option('-input_h5','coco/data.h5','path to the h5file containing the preproc
 cmd:option('-input_json','coco/data.json','path to the json file containing additional info and vocab')
 cmd:option('-cnn_proto','model/VGG_ILSVRC_16_layers_deploy.prototxt','path to CNN prototxt file in Caffe format. Note this MUST be a VGGNet-16 right now.')
 cmd:option('-cnn_model','model/VGG_ILSVRC_16_layers.caffemodel','path to CNN model file containing the weights, Caffe format. Note this MUST be a VGGNet-16 right now.')
+cmd:option('-cnn_lua','','serialized Torch CNN model of VGGNet. Used if the raw model cannot be initialized with loadcaffe.')
 cmd:option('-start_from', '', 'path to a model checkpoint to initialize model weights from. Empty = don\'t')
 
 -- Model settings
@@ -56,12 +57,12 @@ cmd:option('-cnn_weight_decay', 0, 'L2 weight decay just for the CNN')
 -- Evaluation/Checkpointing
 cmd:option('-val_images_use', 3200, 'how many images to use when periodically evaluating the validation loss? (-1 = all)')
 cmd:option('-save_checkpoint_every', 2500, 'how often to save a model checkpoint?')
-cmd:option('-checkpoint_path', '', 'folder to save checkpoints into (empty = this folder)')
+cmd:option('-checkpoint_path', 'checkpoints', 'folder to save checkpoints into (empty = this folder)')
 cmd:option('-language_eval', 0, 'Evaluate language as well (1 = yes, 0 = no)? BLEU/CIDEr/METEOR/ROUGE_L? requires coco-caption code from Github.')
 cmd:option('-losses_log_every', 25, 'How often do we snapshot losses, for inclusion in the progress dump? (0 = disable)')
 
 -- misc
-cmd:option('-backend', 'cudnn', 'nn|cudnn')
+cmd:option('-backend', 'nn', 'nn|cudnn')
 cmd:option('-id', '', 'an id identifying this run/job. used in cross-val and appended when writing progress files')
 cmd:option('-seed', 123, 'random number generator seed to use')
 cmd:option('-gpuid', 0, 'which gpu to use. -1 = use CPU')
@@ -118,7 +119,14 @@ else
   -- initialize the ConvNet
   local cnn_backend = opt.backend
   if opt.gpuid == -1 then cnn_backend = 'nn' end -- override to nn if gpu is disabled
-  local cnn_raw = loadcaffe.load(opt.cnn_proto, opt.cnn_model, cnn_backend)
+  local cnn_raw
+  if string.len(opt.cnn_lua) > 0 then
+    cnn_raw = torch.load(opt.cnn_lua)
+  else
+    cnn_raw = loadcaffe.load(opt.cnn_proto, opt.cnn_model, cnn_backend)
+  end
+  --local cnn_raw = loadcaffe.load(opt.cnn_proto, opt.cnn_model, cnn_backend)
+  --local cnn_raw = torch.load('model/vgg.net')
   protos.cnn = net_utils.build_cnn(cnn_raw, {encoding_size = opt.input_encoding_size, backend = cnn_backend})
   -- initialize a special FeatExpander module that "corrects" for the batch number discrepancy 
   -- where we have multiple captions per one image in a batch. This is done for efficiency
