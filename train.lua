@@ -406,6 +406,6 @@ while true do
     print('loss seems to be exploding, quitting.')
     break
   end
-  if opt.max_iters > 0 and iter >= opt.max_iters then break end -- stopping criterion
+  if opt.max_iters > 0 and iter > opt.max_iters then break end -- stopping criterion
 
 end
