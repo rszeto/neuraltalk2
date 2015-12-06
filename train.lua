@@ -333,6 +333,7 @@ while true do
     print('wrote json checkpoint to ' .. checkpoint_path .. '.json')
 
     -- write the full model checkpoint as well if we did better than ever
+    -- additionally, write if this is the last iteration
     local current_score
     if lang_stats then
       -- use CIDEr score for deciding how well we did
@@ -341,7 +342,7 @@ while true do
       -- use the (negative) validation loss as a score
       current_score = -val_loss
     end
-    if best_score == nil or current_score > best_score then
+    if best_score == nil or current_score > best_score or iter == opt.max_iters then
       best_score = current_score
       if iter > 0 then -- dont save on very first iteration
         -- include the protos (which have weights) and save to file
@@ -352,8 +353,13 @@ while true do
         -- also include the vocabulary mapping so that we can use the checkpoint 
         -- alone to run on arbitrary images without the data loader
         checkpoint.vocab = loader:getVocab()
-        torch.save(checkpoint_path .. '.t7', checkpoint)
-        print('wrote checkpoint to ' .. checkpoint_path .. '.t7')
+        torch.save(checkpoint_path .. '_best.t7', checkpoint)
+        print('wrote best checkpoint to ' .. checkpoint_path .. '_best.t7')
+        -- also save checkpoint if maximum number of iterations was hit
+        if iter == opt.max_iters then
+          torch.save(checkpoint_path .. '_iter' .. iter .. '.t7', checkpoint)
+          print('wrote last checkpoint to ' .. checkpoint_path .. '_iter' .. iter .. '.t7')
+        end
       end
     end
   end
