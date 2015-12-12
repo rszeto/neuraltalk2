@@ -27,6 +27,7 @@ cmd:option('-cnn_proto','model/VGG_ILSVRC_16_layers_deploy.prototxt','path to CN
 cmd:option('-cnn_model','model/VGG_ILSVRC_16_layers.caffemodel','path to CNN model file containing the weights, Caffe format. Note this MUST be a VGGNet-16 right now.')
 cmd:option('-cnn_lua','','serialized Torch CNN model of VGGNet. Used if the raw model cannot be initialized with loadcaffe.')
 cmd:option('-start_from', '', 'path to a model checkpoint to initialize model weights from. Empty = don\'t')
+cmd:option('-posenet_lua','','Torch CNN model for locating joints.')
 
 -- Model settings
 cmd:option('-rnn_size',512,'size of the rnn in number of hidden nodes in each layer')
@@ -34,7 +35,7 @@ cmd:option('-input_encoding_size',512,'the encoding size of each token in the vo
 
 -- Optimization: General
 cmd:option('-max_iters', -1, 'max number of iterations to run for (-1 = run forever)')
-cmd:option('-batch_size',16,'what is the batch size in number of images per batch? (there will be x seq_per_img sentences)')
+cmd:option('-batch_size',1,'what is the batch size in number of images per batch? (there will be x seq_per_img sentences)')
 cmd:option('-grad_clip',0.1,'clip gradients at this value (note should be lower than usual 5 because we normalize grads by both batch and seq_length)')
 cmd:option('-drop_prob_lm', 0.5, 'strength of dropout in the Language Model RNN')
 cmd:option('-finetune_cnn_after', -1, 'After what iteration do we start finetuning the CNN? (-1 = disable; never finetune, 0 = finetune from start)')
@@ -62,7 +63,7 @@ cmd:option('-language_eval', 0, 'Evaluate language as well (1 = yes, 0 = no)? BL
 cmd:option('-losses_log_every', 25, 'How often do we snapshot losses, for inclusion in the progress dump? (0 = disable)')
 
 -- misc
-cmd:option('-backend', 'nn', 'nn|cudnn')
+cmd:option('-backend', 'cudnn', 'nn|cudnn')
 cmd:option('-id', '', 'an id identifying this run/job. used in cross-val and appended when writing progress files')
 cmd:option('-seed', 123, 'random number generator seed to use')
 cmd:option('-gpuid', 0, 'which gpu to use. -1 = use CPU')
@@ -125,9 +126,12 @@ else
   else
     cnn_raw = loadcaffe.load(opt.cnn_proto, opt.cnn_model, cnn_backend)
   end
-  --local cnn_raw = loadcaffe.load(opt.cnn_proto, opt.cnn_model, cnn_backend)
-  --local cnn_raw = torch.load('model/vgg.net')
-  protos.cnn = net_utils.build_cnn(cnn_raw, {encoding_size = opt.input_encoding_size, backend = cnn_backend})
+  -- Produce CNN that outputs the fc7 features from VGG-16
+  protos.cnn = net_utils.build_cnn2(cnn_raw, {encoding_size = opt.input_encoding_size, backend = cnn_backend})
+  protos.posenet = torch.load(opt.posenet_lua)
+  protos.cnnAndPoseToEncoding = nn.Sequential()
+  protos.cnnAndPoseToEncoding:add(nn.Linear(4096+120, opt.input_encoding_size))
+  protos.cnnAndPoseToEncoding:add(nn.ReLU(true))
   -- initialize a special FeatExpander module that "corrects" for the batch number discrepancy 
   -- where we have multiple captions per one image in a batch. This is done for efficiency
   -- because doing a CNN forward pass is expensive. We expand out the CNN features for each sentence
@@ -191,7 +195,27 @@ local function eval_split(split, evalopt)
     n = n + data.images:size(1)
 
     -- forward the model to get loss
-    local feats = protos.cnn:forward(data.images)
+	-- local cnnFeats = protos.cnn:forward(data.images)
+    -- local feats = protos.cnnAndPoseToEncoding:forward(cnnFeats)
+
+	---[[
+    local cnnFeats = protos.cnn:forward(data.images)
+    local jointHeatmaps = protos.posenet:forward(data.humanBB)
+    -- Get maximum locations of each heatmap
+    local jointPoints = torch.FloatTensor(2, jointHeatmaps:size(2))
+    for l=1,jointHeatmaps:size(2) do
+      local heatmap = jointHeatmaps[{1, l, {}, {}}]
+      local maxVal,maxInd = utils.max2(heatmap)
+      jointPoints[{{}, l}] = maxInd
+    end
+    local jointDists = utils.allPairsDists(jointPoints)
+    -- Concatenate features
+    local combined = torch.CudaTensor(1, cnnFeats:nElement()+jointDists:nElement())
+    combined[{{}, {1, cnnFeats:nElement()}}] = cnnFeats
+    combined[{{}, {cnnFeats:nElement()+1, cnnFeats:nElement()+jointDists:nElement()}}] = jointDists
+    local feats = protos.cnnAndPoseToEncoding:forward(combined)
+    --]]
+
     local expanded_feats = protos.expander:forward(feats)
     local logprobs = protos.lm:forward{expanded_feats, data.labels}
     local loss = protos.crit:forward(logprobs, data.labels)
@@ -235,6 +259,7 @@ end
 local iter = 0
 local function lossFun()
   protos.cnn:training()
+  protos.cnnAndPoseToEncoding:training()
   protos.lm:training()
   grad_params:zero()
   if opt.finetune_cnn_after >= 0 and iter >= opt.finetune_cnn_after then
@@ -251,7 +276,27 @@ local function lossFun()
   -- data.seq: LxM where L is sequence length upper bound, and M = N*seq_per_img
 
   -- forward the ConvNet on images (most work happens here)
-  local feats = protos.cnn:forward(data.images)
+  -- local cnnFeats = protos.cnn:forward(data.images)
+  -- local feats = protos.cnnAndPoseToEncoding:forward(cnnFeats)
+  
+  ---[[
+  local cnnFeats = protos.cnn:forward(data.images)
+  local jointHeatmaps = protos.posenet:forward(data.humanBB)
+  -- Get maximum locations of each heatmap
+  local jointPoints = torch.FloatTensor(2, jointHeatmaps:size(2))
+  for l=1,jointHeatmaps:size(2) do
+    local heatmap = jointHeatmaps[{1, l, {}, {}}]
+    local maxVal,maxInd = utils.max2(heatmap)
+    jointPoints[{{}, l}] = maxInd
+  end
+  local jointDists = utils.allPairsDists(jointPoints)
+  -- Concatenate features
+  local combined = torch.CudaTensor(1, cnnFeats:nElement()+jointDists:nElement())
+  combined[{{}, {1, cnnFeats:nElement()}}] = cnnFeats
+  combined[{{}, {cnnFeats:nElement()+1, cnnFeats:nElement()+jointDists:nElement()}}] = jointDists
+  local feats = protos.cnnAndPoseToEncoding:forward(combined)
+  --]]
+  
   -- we have to expand out image features, once for each sentence
   local expanded_feats = protos.expander:forward(feats)
   -- forward the language model

@@ -180,6 +180,20 @@ def main(params):
   f.create_dataset("label_end_ix", dtype='uint32', data=label_end_ix)
   f.create_dataset("label_length", dtype='uint32', data=label_length)
   dset = f.create_dataset("images", (N,3,256,256), dtype='uint8') # space for resized images
+  dsetBB = f.create_dataset("humanBB", (N,3,256,256), dtype='uint8') # space for human bounding boxes
+  
+  '''
+  # Human bounding boxes
+  for i,img in enumerate(imgs):
+    # load the image
+    I = imread(os.path.join(params['images_root'], img['file_path']))    
+    
+    
+    # Print progress
+    if i % 1000 == 0:
+      print 'Human boxes: processing %d/%d (%.2f%% done)' % (i, N, i*100.0/N)
+  '''
+  # Full image
   for i,img in enumerate(imgs):
     # load the image
     I = imread(os.path.join(params['images_root'], img['file_path']))
@@ -196,7 +210,23 @@ def main(params):
     Ir = Ir.transpose(2,0,1)
     # write to h5
     dset[i] = Ir
-    if i % 1000 == 0:
+    
+    # Crop the image to the human bounding box
+    bbox = [int(x) for x in img['bbox']]
+    humanImg = I[bbox[1]:bbox[1]+bbox[3],bbox[0]:bbox[0]+bbox[2]]
+    # Rescale
+    humanImgR = imresize(humanImg, (256, 256))
+    # handle grayscale input images
+    if len(humanImgR.shape) == 2:
+      humanImgR = humanImgR[:,:,np.newaxis]
+      humanImgR = np.concatenate((humanImgR,humanImgR,humanImgR), axis=2)
+    # and swap order of axes from (256,256,3) to (3,256,256)
+    humanImgR = humanImgR.transpose(2,0,1)
+    # write to h5
+    dsetBB[i] = humanImgR
+    
+    # Print progress
+    if i % 500 == 0:
       print 'processing %d/%d (%.2f%% done)' % (i, N, i*100.0/N)
   f.close()
   print 'wrote ', params['output_h5']
@@ -211,6 +241,7 @@ def main(params):
     jimg['split'] = img['split']
     if 'file_path' in img: jimg['file_path'] = img['file_path'] # copy it over, might need
     if 'id' in img: jimg['id'] = img['id'] # copy over & mantain an id, if present (e.g. coco ids, useful)
+    if 'bbox' in img: jimg['bbox'] = img['bbox']
     
     out['images'].append(jimg)
   

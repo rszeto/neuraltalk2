@@ -26,6 +26,16 @@ function DataLoader:__init(opt)
   print(string.format('read %d images of size %dx%dx%d', self.num_images, 
             self.num_channels, self.max_image_size, self.max_image_size))
 
+  -- extract image size from dataset
+  local images_size = self.h5_file:read('/humanBB'):dataspaceSize()
+  assert(#images_size == 4, '/images should be a 4D tensor')
+  assert(images_size[3] == images_size[4], 'width and height must match')
+  assert(self.num_images == images_size[1])
+  assert(self.num_channels == images_size[2])
+  assert(self.max_image_size == images_size[3])
+  print(string.format('read %d human BB images of size %dx%dx%d', self.num_images, 
+            self.num_channels, self.max_image_size, self.max_image_size))
+
   -- load in the sequence data
   local seq_size = self.h5_file:read('/labels'):dataspaceSize()
   self.seq_length = seq_size[2]
@@ -85,6 +95,7 @@ function DataLoader:getBatch(opt)
 
   -- pick an index of the datapoint to load next
   local img_batch_raw = torch.ByteTensor(batch_size, 3, 256, 256)
+  local humanBB_batch_raw = torch.CudaTensor(batch_size, 3, 256, 256)
   local label_batch = torch.LongTensor(batch_size * seq_per_img, self.seq_length)
   local max_index = #split_ix
   local wrapped = false
@@ -102,6 +113,9 @@ function DataLoader:getBatch(opt)
     local img = self.h5_file:read('/images'):partial({ix,ix},{1,self.num_channels},
                             {1,self.max_image_size},{1,self.max_image_size})
     img_batch_raw[i] = img
+	local humanBB = self.h5_file:read('/humanBB'):partial({ix,ix},{1,self.num_channels},
+                            {1,self.max_image_size},{1,self.max_image_size})
+	humanBB_batch_raw[i] = humanBB
 
     -- fetch the sequence labels
     local ix1 = self.label_start_ix[ix]
@@ -128,11 +142,13 @@ function DataLoader:getBatch(opt)
     local info_struct = {}
     info_struct.id = self.info.images[ix].id
     info_struct.file_path = self.info.images[ix].file_path
+	info_struct.bbox = self.info.images[ix].bbox
     table.insert(infos, info_struct)
   end
 
   local data = {}
   data.images = img_batch_raw
+  data.humanBB = humanBB_batch_raw
   data.labels = label_batch:transpose(1,2):contiguous() -- note: make label sequences go down as columns
   data.bounds = {it_pos_now = self.iterators[split], it_max = #split_ix, wrapped = wrapped}
   data.infos = infos

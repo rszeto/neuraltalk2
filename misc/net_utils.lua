@@ -29,6 +29,33 @@ function net_utils.build_cnn(cnn, opt)
   return cnn_part
 end
 
+-- Custom net surgery that does not add new fully-connected layer
+function net_utils.build_cnn2(cnn, opt)
+  local layer_num = utils.getopt(opt, 'layer_num', 38)
+  local backend = utils.getopt(opt, 'backend', 'cudnn')
+  local encoding_size = utils.getopt(opt, 'encoding_size', 512)
+
+  if backend == 'cudnn' then
+    require 'cudnn'
+    backend = cudnn
+  elseif backend == 'nn' then
+    require 'nn'
+    backend = nn
+  else
+    error(string.format('Unrecognized backend "%s"', backend))
+  end
+
+  -- copy over the first layer_num layers of the CNN
+  local cnn_part = nn.Sequential()
+  for i = 1, layer_num do
+    local layer = cnn:get(i)
+    cnn_part:add(layer)
+  end
+
+  return cnn_part
+end
+  
+
 -- takes a batch of images and preprocesses them
 -- VGG-16 network is hardcoded, as is 224 as size to forward
 function net_utils.prepro(imgs, data_augment, on_gpu)

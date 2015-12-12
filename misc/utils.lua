@@ -68,4 +68,31 @@ function utils.average_values(t)
   return vsum / n
 end
 
+-- Finds the maximum in a 2D tensor and its index because
+-- it has to be unnecessarily complicated in Torch
+function utils.max2(data)
+  local maxVal1, maxInd1 = torch.max(data, 1)
+  local maxVal2, maxInd2 = torch.max(maxVal1, 2)
+  maxInd2 = maxInd2[1][1]
+  maxInd1 = maxInd1[1][maxInd2]
+  return maxVal2[1][1], torch.LongTensor({maxInd1, maxInd2})
+end
+
+-- Find the distances between each of the given points
+-- points is a 2xN FloatTensor
+function utils.allPairsDists(points)
+  assert(torch.type(points) == 'torch.FloatTensor', 'points was not a FloatTensor')
+  local numPoints = points:size(2)
+  local numDists = numPoints*(numPoints-1)/2
+  local pointDists = torch.FloatTensor(numDists)
+  local i = 1
+  for j=1,numPoints do
+    for k=j+1,numPoints do
+      pointDists[i] = torch.norm(points[{{}, j}] - points[{{}, k}])
+      i = i+1
+    end
+  end
+  return pointDists
+end
+
 return utils
