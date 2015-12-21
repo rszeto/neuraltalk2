@@ -23,8 +23,8 @@ cmd:text('Options')
 cmd:option('-model','','path to model to evaluate')
 -- Basic options
 cmd:option('-batch_size', 1, 'if > 0 then overrule, otherwise load from checkpoint.')
-cmd:option('-num_images', 100, 'how many images to use when periodically evaluating the loss? (-1 = all)')
-cmd:option('-language_eval', 0, 'Evaluate language as well (1 = yes, 0 = no)? BLEU/CIDEr/METEOR/ROUGE_L? requires coco-caption code from Github.')
+cmd:option('-num_images', -1, 'how many images to use when periodically evaluating the loss? (-1 = all)')
+cmd:option('-language_eval', 1, 'Evaluate language as well (1 = yes, 0 = no)? BLEU/CIDEr/METEOR/ROUGE_L? requires coco-caption code from Github.')
 cmd:option('-dump_images', 1, 'Dump images into vis/imgs folder for vis? (1=yes,0=no)')
 cmd:option('-dump_json', 1, 'Dump json with predictions into vis folder? (1=yes,0=no)')
 -- Sampling options
@@ -33,12 +33,13 @@ cmd:option('-beam_size', 1, 'used when sample_max = 1, indicates number of beams
 cmd:option('-temperature', 1.0, 'temperature when sampling from distributions (i.e. when sample_max = 0). Lower = "safer" predictions.')
 -- For evaluation on a folder of images:
 cmd:option('-image_folder', '', 'If this is nonempty then will predict on the images in this folder path')
-cmd:option('-image_root', '', 'In case the image paths have to be preprended with a root path to an image folder')
+cmd:option('-image_root', 'coco/images', 'In case the image paths have to be preprended with a root path to an image folder')
 -- For evaluation on MSCOCO images from some split:
 cmd:option('-input_h5','','path to the h5file containing the preprocessed dataset. empty = fetch from model checkpoint.')
 cmd:option('-input_json','','path to the json file containing additional info and vocab. empty = fetch from model checkpoint.')
 cmd:option('-split', 'test', 'if running on MSCOCO images, which split to use: val|test|train')
 cmd:option('-coco_json', '', 'if nonempty then use this file in DataLoaderRaw (see docs there). Used only in MSCOCO test evaluation, where we have a specific json file of only test set images.')
+cmd:option('-posenet_lua','','Torch CNN model for locating joints.')
 -- misc
 cmd:option('-backend', 'cudnn', 'nn|cudnn')
 cmd:option('-id', 'evalscript', 'an id identifying this run/job. used only if language_eval = 1 for appending to intermediate files')
@@ -93,17 +94,23 @@ local protos = checkpoint.protos
 protos.expander = nn.FeatExpander(opt.seq_per_img)
 protos.crit = nn.LanguageModelCriterion()
 protos.lm:createClones() -- reconstruct clones inside the language model
+protos.posenet = torch.load(opt.posenet_lua) -- load from file
 if opt.gpuid >= 0 then for k,v in pairs(protos) do v:cuda() end end
 
 -------------------------------------------------------------------------------
 -- Evaluation fun(ction)
 -------------------------------------------------------------------------------
 local function eval_split(split, evalopt)
+  print('Evaluating model on set "' .. split .. '"')
   local verbose = utils.getopt(evalopt, 'verbose', true)
   local num_images = utils.getopt(evalopt, 'num_images', true)
+  if num_images <= 0 then
+    num_images = #loader.split_ix[split]
+  end
 
   protos.cnn:evaluate()
   protos.lm:evaluate()
+  protos.cnnAndPoseToEncoding:evaluate()
   loader:resetIterator(split) -- rewind iteator back to first datapoint in the split
   local n = 0
   local loss_sum = 0
@@ -117,7 +124,25 @@ local function eval_split(split, evalopt)
     n = n + data.images:size(1)
 
     -- forward the model to get loss
-    local feats = protos.cnn:forward(data.images)
+    -- local feats = protos.cnn:forward(data.images)
+    
+    ---[[
+    local cnnFeats = protos.cnn:forward(data.images)
+    local jointHeatmaps = protos.posenet:forward(data.humanBB)
+    -- Get maximum locations of each heatmap
+    local jointPoints = torch.FloatTensor(2, jointHeatmaps:size(2))
+    for l=1,jointHeatmaps:size(2) do
+      local heatmap = jointHeatmaps[{1, l, {}, {}}]
+      local maxVal,maxInd = utils.max2(heatmap)
+      jointPoints[{{}, l}] = maxInd
+    end
+    local jointDists = utils.allPairsDists(jointPoints)
+    -- Concatenate features
+    local combined = torch.CudaTensor(1, cnnFeats:nElement()+jointDists:nElement())
+    combined[{{}, {1, cnnFeats:nElement()}}] = cnnFeats
+    combined[{{}, {cnnFeats:nElement()+1, cnnFeats:nElement()+jointDists:nElement()}}] = jointDists
+    local feats = protos.cnnAndPoseToEncoding:forward(combined)
+    --]]
 
     -- evaluate loss if we have the labels
     local loss = 0

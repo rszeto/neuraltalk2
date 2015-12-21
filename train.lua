@@ -39,6 +39,7 @@ cmd:option('-batch_size',1,'what is the batch size in number of images per batch
 cmd:option('-grad_clip',0.1,'clip gradients at this value (note should be lower than usual 5 because we normalize grads by both batch and seq_length)')
 cmd:option('-drop_prob_lm', 0.5, 'strength of dropout in the Language Model RNN')
 cmd:option('-finetune_cnn_after', -1, 'After what iteration do we start finetuning the CNN? (-1 = disable; never finetune, 0 = finetune from start)')
+cmd:option('-finetune_imToWord_after', -1, 'After what iteration do we start finetuning the image to word layer? (-1 = disable; never finetune, 0 = finetune from start)')
 cmd:option('-seq_per_img',5,'number of captions to sample for each image during training. Done for efficiency since CNN forward pass is expensive. E.g. coco has 5 sents/image')
 -- Optimization: for the Language Model
 cmd:option('-optim','adam','what update to use? rmsprop|sgd|sgdmom|adagrad|adam')
@@ -101,10 +102,12 @@ if string.len(opt.start_from) > 0 then
   local loaded_checkpoint = torch.load(opt.start_from)
   protos = loaded_checkpoint.protos
   net_utils.unsanitize_gradients(protos.cnn)
+  net_utils.unsanitize_gradients(protos.cnnAndPoseToEncoding)
   local lm_modules = protos.lm:getModulesList()
   for k,v in pairs(lm_modules) do net_utils.unsanitize_gradients(v) end
   protos.crit = nn.LanguageModelCriterion() -- not in checkpoints, create manually
   protos.expander = nn.FeatExpander(opt.seq_per_img) -- not in checkpoints, create manually
+  protos.posenet = torch.load(opt.posenet_lua) -- not in checkpoints, must load from separate file
 else
   -- create protos from scratch
   -- intialize language model
@@ -149,10 +152,13 @@ end
 -- Keep CNN params separate in case we want to try to get fancy with different optims on LM/CNN
 local params, grad_params = protos.lm:getParameters()
 local cnn_params, cnn_grad_params = protos.cnn:getParameters()
+local imToWord_params, imToWord_grad_params = protos.cnnAndPoseToEncoding:getParameters()
 print('total number of parameters in LM: ', params:nElement())
 print('total number of parameters in CNN: ', cnn_params:nElement())
+print('total number of parameters in imToPose: ', imToWord_params:nElement())
 assert(params:nElement() == grad_params:nElement())
 assert(cnn_params:nElement() == cnn_grad_params:nElement())
+assert(imToWord_params:nElement() == imToWord_grad_params:nElement())
 
 -- construct thin module clones that share parameters with the actual
 -- modules. These thin module will have no intermediates and will be used
@@ -163,6 +169,9 @@ thin_lm.lookup_table:share(protos.lm.lookup_table, 'weight', 'bias')
 local thin_cnn = protos.cnn:clone('weight', 'bias')
 -- sanitize all modules of gradient storage so that we dont save big checkpoints
 net_utils.sanitize_gradients(thin_cnn)
+local thin_cnnAndPoseToEncoding = protos.cnnAndPoseToEncoding:clone('weight', 'bias')
+-- sanitize all modules of gradient storage so that we dont save big checkpoints
+net_utils.sanitize_gradients(thin_cnnAndPoseToEncoding)
 local lm_modules = thin_lm:getModulesList()
 for k,v in pairs(lm_modules) do net_utils.sanitize_gradients(v) end
 
@@ -265,6 +274,9 @@ local function lossFun()
   if opt.finetune_cnn_after >= 0 and iter >= opt.finetune_cnn_after then
     cnn_grad_params:zero()
   end
+  if opt.finetune_imToWord_after >= 0 and iter >= opt.finetune_imToWord_after then
+    imToWord_grad_params:zero()
+  end
 
   -----------------------------------------------------------------------------
   -- Forward pass
@@ -315,6 +327,11 @@ local function lossFun()
   if opt.finetune_cnn_after >= 0 and iter >= opt.finetune_cnn_after then
     local dfeats = protos.expander:backward(feats, dexpanded_feats)
     local dx = protos.cnn:backward(data.images, dfeats)
+  end
+  -- backprop the imToWord layer, but only if we are finetuning
+  if opt.finetune_imToWord_after >= 0 and iter >= opt.finetune_imToWord_after then
+    local dfeats = protos.expander:backward(feats, dexpanded_feats)
+    local dx = protos.cnnAndPoseToEncoding:backward(data.images, dfeats)
   end
 
   -- clip gradients
@@ -394,6 +411,7 @@ while true do
         local save_protos = {}
         save_protos.lm = thin_lm -- these are shared clones, and point to correct param storage
         save_protos.cnn = thin_cnn
+        save_protos.cnnAndPoseToEncoding = thin_cnnAndPoseToEncoding
         checkpoint.protos = save_protos
         -- also include the vocabulary mapping so that we can use the checkpoint 
         -- alone to run on arbitrary images without the data loader
@@ -444,6 +462,20 @@ while true do
       sgdm(cnn_params, cnn_grad_params, cnn_learning_rate, opt.cnn_optim_alpha, cnn_optim_state)
     elseif opt.cnn_optim == 'adam' then
       adam(cnn_params, cnn_grad_params, cnn_learning_rate, opt.cnn_optim_alpha, opt.cnn_optim_beta, opt.optim_epsilon, cnn_optim_state)
+    else
+      error('bad option for opt.cnn_optim')
+    end
+  end
+  
+  -- do a imToWord update (if finetuning, and if rnn above us is not warming up right now)
+  -- use cnn optimization parameters and hope it works
+  if opt.finetune_imToWord_after >= 0 and iter >= opt.finetune_imToWord_after then
+    if opt.cnn_optim == 'sgd' then
+      sgd(imToWord_params, imToWord_grad_params, cnn_learning_rate)
+    elseif opt.cnn_optim == 'sgdm' then
+      sgdm(imToWord_params, imToWord_grad_params, cnn_learning_rate, opt.cnn_optim_alpha, cnn_optim_state)
+    elseif opt.cnn_optim == 'adam' then
+      adam(imToWord_params, imToWord_grad_params, cnn_learning_rate, opt.cnn_optim_alpha, opt.cnn_optim_beta, opt.optim_epsilon, cnn_optim_state)
     else
       error('bad option for opt.cnn_optim')
     end
